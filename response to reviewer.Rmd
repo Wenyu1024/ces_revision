@@ -1,0 +1,879 @@
+---
+title: "Combined_essentiality_paper"
+author: "wenyu"
+date: "Aug 29, 2019"
+output: html_document
+---
+
+```{r setup, incluide=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+#Env, function and data preparing
+## ENV
+```{r,message=FALSE, warning= FALSE}
+#some loading
+input_data_dir= "C:/Users/wenyu/Documents/functional genomics/manuscript3_ebiomedicine/github submission/input_data"
+output_fig_dir= "C:/Users/wenyu/Documents/functional genomics/manuscript3_ebiomedicine/figdir3"
+library(data.table)
+library(tidyr)
+#library(plyr)
+library(dplyr)
+library(openxlsx)
+library(plotROC)
+library(RAM)
+library(cowplot)
+library(stringr)
+# library(ggpubr)
+library(RColorBrewer)
+library(cgdsr)
+library(tibble)
+
+memory.limit(size=30000)
+options(stringsAsFactors = FALSE)
+col_panel <- brewer.pal(9, "Set1")
+```
+
+## Data 
+```{r}
+setwd(input_data_dir)
+data_long_null <- fread("data_long1_new_revise.csv") #data is not normalized
+
+data_long_null <- data_long_null %>%  select(-cell)
+colnames(data_long_null)[11] <- "cell"
+data_long_null$tissue_origin[which(data_long_null$tissue_origin == "Lung NSCLC")] = "Lung"
+data_long_null$tissue_origin[which(data_long_null$tissue_origin == "Lung NSCLC")] = "Lung"
+data_long_null$cell[which(data_long_null$cell == "LNCAPCLONEFGC")] = "LNCAP"
+
+summary(data_long_null)
+apply(data_long_null[,2:10], 2, Hmisc::describe)
+
+
+#first use cell-wise z normalization
+data_long <- data_long_null %>% 
+  group_by(cell) %>% 
+  mutate_at(.vars = 2:10,.funs = scale) %>% 
+  ungroup(cell)
+summary(data_long)
+apply(data_long[,2:10], 2, var, na.rm=T)
+```
+
+
+```{r}
+setwd(input_data_dir)
+hk_gene <- fread(file = 'HK_genes.txt',header = F)
+hk_gene <- hk_gene$V1
+comess_gene <- fread(file = "training_essentials.txt",header = T)
+#https://www.g3journal.org/content/7/8/2719
+comess_gene <- comess_gene$Gene
+#http://msb.embopress.org/content/10/7/733.long#DC
+comness_gene <- fread(file = "NEGv1.txt",header =T)
+comness_gene <- comness_gene$Gene
+setwd(input_data_dir)
+comess_gene2 <- fread(file = "CEG2.txt",header =F)
+comess_gene2 <- comess_gene2$V1
+cancergene_2018 <- fread("onco_tsg_2018Bailey.csv")
+#table s1 in https://ars.els-cdn.com/content/image/1-s2.0-S009286741830237X-mmc1.xlsx
+colnames(cancergene_2018)[4] <- "type"
+oncogene_2018 <- cancergene_2018 %>% filter(Cancer == "PANCAN") %>% filter(type == "oncogene") %>% pull(Gene)
+tsg_2018 <- cancergene_2018 %>% filter(Cancer == "PANCAN") %>% filter(type == "tsg") %>% pull(Gene)
+```
+
+```{r}
+#make a function for exporting figures
+export_fig <- function(fig_name, width= 10.7, height, unit="cm", plot = NULL) {
+    if (is.null(plot)) {
+        plot <- last_plot()
+    }
+    ggsave(file.path(output_fig_dir, paste0(fig_name, '.svg')), 
+             width = width, height = height, plot = plot)
+    dev.off()
+    ggsave(file.path(output_fig_dir, paste0(fig_name, '.tiff')), dpi=300, 
+           width = width, height = height, plot = plot)
+    dev.off()
+    ggsave(file.path(output_fig_dir, paste0(fig_name, '.png')), dpi=300, 
+       width = width, height = height, plot = plot)
+    dev.off()
+}
+```
+
+
+# CES improves the prediction of common essential genes
+
+## data preparation
+```{r}
+set.seed(1234)
+tmp <- filter(data_long, cell!= "DLD1") 
+lm <- with(tmp, lm(crispr~ rnai_un+mut+seq+cn+array+cell )) 
+lm_o <- with(tmp, lm(rnai_un~ crispr+mut+seq+cn+array+cell )) 
+
+#ces
+tmp1 <- tmp %>% 
+  mutate(ces= predict.lm(lm, newdata = tmp)) %>% 
+  mutate(ces_o= predict.lm(lm_o, newdata = tmp)) 
+  
+check <- data_long1 %>% select(cell, ceres, demeter2) %>% drop_na() %>% pull(cell) 
+
+setdiff(unique(data_long1$cell), check)
+
+tmp2 <-  data_long %>% 
+  filter(!(cell %in%  c("ASPC1", "DLD1", "HCT116", "HL60", "HPAFII")
+           )
+         ) 
+lm_new <- with(tmp2, lm(ceres~ demeter2+mut+seq+cn+array+cell ))
+lm_new_o <- with(tmp2, lm(demeter2~ ceres+mut+seq+cn+array+cell ))
+
+tmp2 <- 
+  tmp2 %>% 
+  mutate(ces_new= predict.lm(lm_new, newdata = tmp2)) %>% 
+  mutate(ces_new_o= predict.lm(lm_new_o, newdata = tmp2) ) 
+
+data_long1 <- left_join(x = data_long, y = tmp1) %>%   
+  left_join(tmp2) 
+
+colnames(data_long1)  
+
+data_long1 <-
+  data_long1 %>% 
+  group_by(cell) %>%  
+  mutate_at(.vars = 13:16,.funs = scale) %>% 
+  ungroup()
+
+apply(data_long1[,c(2:9,13:16)], 2, var,na.rm=T)
+
+rank_own = function(x) {res=rank(x);res[which(is.na(x)==T)]=NA;res}
+
+setDT(data_long1)[,c("crispr_rank","rnai_rank","de_rank", "de2_rank","ceres_rank","ces_rank","ces_o_rank","ces_new_rank","ces_new_o_rank","seq_rank","array_rank"):=
+                    .(rank_own(crispr),
+                      rank_own(rnai_un),
+                      rank_own(demeter),
+                      rank_own(demeter2),
+                      rank_own(ceres),
+                      rank_own(ces),
+                      rank_own(ces_o),
+                      rank_own(ces_new),
+                      rank_own(ces_new_o),
+                      rank_own(-seq),
+                      rank_own(-array)
+                           ), 
+                          by=.(cell)]  
+
+ 
+```
+
+
+```{r}
+plotroc_given_ref_met <- function(method, TP, TN){
+  tmp1 <- data_long1 %>% 
+    filter(gene %in% c(TP, TN)) %>% 
+    mutate(group= case_when(gene %in% TP~ 0, TRUE ~1)) %>% 
+    select(one_of(method),group) 
+  if ("array" %in% method){
+    tmp1$array <- -tmp1$array
+  }
+  if ("seq" %in% method){
+    tmp1$seq <- -tmp1$seq
+  }
+  longtest <- melt_roc(data = tmp1, d = "group", m = 1:(dim(tmp1)[2]-1)) 
+  colnames(longtest)[1] <- "D"
+  fig = longtest %>% 
+    select(D,M,name) %>% 
+    ggplot(aes(d = D, m = M, color = name)) + 
+    geom_roc(n.cuts=0) + style_roc(xlab="FPR",ylab="TPR")+
+    scale_x_continuous(breaks=seq(0,1,0.2),name = "FPR")+
+    scale_y_continuous(breaks=seq(0,1,0.2),name = "TPR")
+  fig
+}
+
+auc_table <- function(fig,ref_method= "ces", calc_p = T){
+  check <- data.frame(
+    score_name=sort(unique((fig$data)$name)), 
+    AUC_value=calc_auc(fig)$AUC
+    )
+  check %>%  tbl_df() %>% arrange(AUC_value)
+  score_names <- check %>%  tbl_df() %>% arrange(desc(AUC_value)) %>% pull(score_name)
+  if (calc_p == F){ 
+    p_aucs= "not calculated"
+    } else {
+      get_p_auc <- function( new_method_name ){
+    library(pROC)
+    tmp1 = fig$data
+    tmp2 = tmp1 %>% filter(name == ref_method)
+    tmp3 = tmp1 %>% filter(name == new_method_name)
+    rocobj1 = roc(tmp2$D, tmp2$M)
+    rocobj2 = roc(tmp3$D, tmp3$M)
+    roc.test(rocobj1, rocobj2)$p.value
+      }
+    p_aucs= mapply(FUN = get_p_auc, score_names)
+  }
+
+  check %>%  tbl_df() %>% arrange(desc(AUC_value)) %>% 
+    mutate(p= p_aucs)
+}
+
+
+fig1 <- plotroc_given_ref_met(method = colnames(data_long1)[c(2:5, 8:10,13:16)],TP=comess_gene,TN=comness_gene)
+
+auc_table(fig1,calc_p = F)
+
+
+fig2 <- plotroc_given_ref_met(method = colnames(data_long1)[c(2:5, 8:10,13:16)],TP=comess_gene2,TN=comness_gene)
+
+auc_table(fig2,calc_p = F)
+
+fig3 <- plotroc_given_ref_met(method = colnames(data_long1)[c(2:5, 8:10,13:16)],TP=intersect(comess_gene,comess_gene2),TN=comness_gene)
+
+auc_table(fig3,calc_p = F)
+
+fig4 <- plotroc_given_ref_met(method = colnames(data_long1)[c(2:5, 8:10,13:16)],TP=hk_gene,TN=comness_gene)
+
+auc_table(fig4,calc_p = F)
+
+fig5 <- plotroc_given_ref_met(method = colnames(data_long1)[c(2:5, 8:10,13:16)],TP=oncogene_2018,TN=tsg_2018)
+
+auc_table(fig5,calc_p = F)
+
+check <- plotroc_given_ref_met(method = colnames(data_long1)[c(13:14)],TP=comess_gene,TN=comness_gene)
+auc_table(check,calc_p = F)
+check
+check <- plotroc_given_ref_met(method = colnames(data_long1)[c(13:14)],TP=hk_gene,TN=comness_gene)
+auc_table(check,calc_p = F)
+check
+check <- plotroc_given_ref_met(method = colnames(data_long1)[c(13:14)],TP=oncogene_2018,TN=tsg_2018)
+check
+auc_table(check,calc_p = F)
+```
+
+can we further use oncogenes and tsg in a tissue specific way?
+```{r}
+unique(data_long1$tissue_origin)
+colnames(cancergene_2018)
+unique(cancergene_2018$)
+
+
+data_long1 %>% filter(tissue_origin== "SKIN") %>% pull(cell) %>% unique()
+
+check <- data_long1 %>% filter(gene=="BRAF")
+
+# find genes whose expression is low but ces is also low
+check <- 
+  data_long1 %>% filter(gene %in% oncogene_2018) %>% 
+  group_by(gene) %>% 
+  summarise(array_mean= mean(array,na.rm=T),
+            seq_mean=mean(seq,na.rm=T),
+            ces_mean=mean(ces,na.rm=T)
+  ) %>% 
+  mutate(diff_ces_array= ces_mean+ array_mean) %>% 
+  mutate(diff_ces_seq= ces_mean+ seq_mean) 
+
+
+#find genes whose ces is 
+check1 <- data_long1 %>% filter(gene %in% tsg_2018) %>% 
+  group_by(gene) %>% 
+  summarise(array_mean= mean(array,na.rm=T),
+            seq_mean=mean(seq,na.rm=T),
+            ces_mean=mean(ces,na.rm=T) )%>% 
+  filter(ces_mean>0 & array_mean>0)
+              
+  
+data_long1 %>% filter(gene %in% comess_gene) %>% pull(array) %>% mean(na.rm=T)
+data_long1 %>% filter(gene %in% comess_gene2) %>% pull(array) %>% mean(na.rm=T)
+data_long1 %>% filter(gene %in% hk_gene) %>% pull(array) %>% mean(na.rm=T)
+data_long1 %>% filter(gene %in% oncogene_2018) %>% pull(array) %>% summary()
+data_long1 %>% filter(gene %in% tsg_2018) %>% pull(array) %>% mean(na.rm=T)
+
+```
+
+```{r}
+cor(data_long1$crispr,data_long1$ces,use = "complete.obs",method = "spearman")
+cor(data_long1$rnai_un,data_long1$ces,use = "complete.obs",method = "spearman")
+
+
+
+
+cor(data_long1$crispr,data_long1$ces_o,use = "complete.obs",method = "spearman")
+cor(data_long1$rnai_un,data_long1$ces_o,use = "complete.obs",method = "spearman")
+cor(data_long1$ces,data_long1$ces_o,use = "complete.obs",method = "spearman")
+# 
+# 
+# 
+# 
+cor(data_long1$ces,data_long1$array,use = "complete.obs",method = "spearman")
+cor(data_long1$ces,data_long1$seq,use = "complete.obs",method = "spearman")
+
+cor(data_long1$ces_o,data_long1$array,use = "complete.obs",method = "spearman")
+cor(data_long1$ces_o,data_long1$seq,use = "complete.obs",method = "spearman")
+cor(data_long1$ces_o,data_long1$cn,use = "complete.obs",method = "spearman")
+
+
+
+
+
+get_cor_table <- function(score1, score2){
+  library(rlang)
+  # quo_score1 = enquo(score1)
+  # quo_score2 = enquo
+  score11= sym(score1)
+  score22= sym(score2)
+  # score11=as.character(score1)
+  # score22= as.character(score2)
+  gene_over3obs <-
+    data_long1 %>%
+    select(gene,!!score11, !!score22) %>%
+    drop_na() %>%
+    group_by(gene) %>%
+    summarize(N=n()) %>%
+    filter(N>2) %>%
+    pull(gene)
+
+data_long1 %>%
+  filter(gene %in% gene_over3obs) %>%
+  select(gene, !!score11, !!score22) %>%
+  group_by(gene) %>%
+  do(broom::tidy(cor.test(x = .data[[score1]], y = .data[[score2]], method = "spearman") ) ) # I think now I have enough knowledge about the quotation, the problem remains because I know little about do and tidy function. I should check them out. especially the pronoun and the dollar sign
+}
+
+get_cor_table("crispr", "ces")
+
+########################################################################
+
+get_genes <- function(score1, score2){
+  quo_score1 = enquo(score1)
+  quo_score2 = enquo(score2)
+
+    data_long1 %>%
+    select(gene,!!quo_score1, !!quo_score2) %>%
+    drop_na() %>%
+    group_by(gene) %>%
+    summarize(N=n()) %>%
+    filter(N>1) %>%
+    pull(gene)
+}
+
+
+#######################
+#ces with features
+gene_over3obs <-get_genes(ces, crispr)
+check1 <- 
+data_long1 %>%
+  filter(gene %in% gene_over3obs) %>%
+  select(gene, ces, crispr) %>%
+  group_by(gene) %>%
+    do(broom::tidy(cor.test(.data$ces, .data$crispr,method = "spearman")))
+
+
+gene_over3obs <-get_genes(ces, rnai_un)
+check2 <- 
+data_long1 %>%
+  filter(gene %in% gene_over3obs) %>%
+  select(gene, ces, rnai_un) %>%
+  group_by(gene) %>%
+  do(broom::tidy(cor.test(.data$ces, .data$rnai_un,method = "spearman")))
+
+gene_over3obs <-get_genes(ces, array)
+check3 <- 
+data_long1 %>%
+  filter(gene %in% gene_over3obs) %>%
+  select(gene, ces, array) %>%
+  group_by(gene) %>%
+  do(broom::tidy(cor.test(.data$ces, .data$array,method = "spearman")))
+
+gene_over3obs <-get_genes(ces, seq)
+
+check4 <- 
+data_long1 %>%
+  filter(gene %in% gene_over3obs) %>%
+  select(gene, ces, seq) %>%
+  group_by(gene) %>%
+  do(broom::tidy(cor.test(.data$ces, .data$seq,method = "spearman")))
+
+##############################
+#ces_o with features
+
+gene_over3obs <-get_genes(ces_o, crispr)
+check5 <- 
+data_long1 %>%
+  filter(gene %in% gene_over3obs) %>%
+  select(gene, ces_o, crispr) %>%
+  group_by(gene) %>%
+  do(broom::tidy(cor.test(.data$ces_o, .data$crispr,method = "spearman")))
+
+
+gene_over3obs <-get_genes(ces_o, rnai_un)
+check6 <- 
+data_long1 %>%
+  filter(gene %in% gene_over3obs) %>%
+  select(gene, ces_o, rnai_un) %>%
+  group_by(gene) %>%
+  do(broom::tidy(cor.test(.data$ces_o, .data$rnai_un,method = "spearman")))
+
+gene_over3obs <-get_genes(ces_o, array)
+check7 <- 
+data_long1 %>%
+  filter(gene %in% gene_over3obs) %>%
+  select(gene, ces_o, array) %>%
+  group_by(gene) %>%
+  do(broom::tidy(cor.test(.data$ces_o, .data$array,method = "spearman")))
+
+gene_over3obs <-get_genes(ces_o, seq)
+check8 <- 
+  data_long1 %>%
+  filter(gene %in% gene_over3obs) %>%
+  select(gene, ces_o, seq) %>%
+  group_by(gene) %>%
+  do(broom::tidy(cor.test(.data$ces_o, .data$seq,method = "spearman")))
+
+#########################################
+#ces against ces_o
+gene_over3obs <-get_genes(ces_o, ces)
+check9 <- 
+  data_long1 %>%
+  filter(gene %in% gene_over3obs) %>%
+  select(gene, ces_o, ces) %>%
+  group_by(gene) %>%
+  do(broom::tidy(cor.test(.data$ces_o, .data$ces,method = "spearman")))
+
+
+```
+
+```{r}
+gene_over3obs <-get_genes(ces, cn)
+check10 <- 
+data_long1 %>%
+  filter(gene %in% gene_over3obs) %>%
+  select(gene, ces, cn) %>%
+  group_by(gene) %>%
+  do(broom::tidy(cor.test(.data$ces, .data$cn,method = "spearman")))
+
+gene_over3obs <-get_genes(ces_o, cn)
+check11 <- 
+  data_long1 %>%
+  filter(gene %in% gene_over3obs) %>%
+  select(gene, ces_o, cn) %>%
+  group_by(gene) %>%
+  do(broom::tidy(cor.test(.data$ces_o, .data$cn,method = "spearman")))
+
+
+```
+
+
+```{r}
+get_cor_sum <- function(data, p_filtering, sum_met){
+  if (p_filtering == T & sum_met == "mean")
+  {data1 <- data%>%ungroup %>% filter(p.value<0.05 ) %>%  summarise(mean(estimate))
+  return(data1)} 
+  if (p_filtering == T & sum_met== "median")
+  {data1 <- data%>%ungroup %>% filter(p.value<0.05 ) %>%  summarise(median(estimate))
+  return(data1)}   
+  if (p_filtering == F & sum_met== "mean")
+  {data1 <- data%>%ungroup  %>%  summarise(mean(estimate))
+    return(data1)}   
+  if (p_filtering == F & sum_met== "median")
+  {data1 <- data%>%ungroup  %>%  summarise(mean(estimate))
+  return(data1)} 
+ 
+  }
+
+
+get_cor_sum(check1, p_filtering = F,sum_met = "mean")
+get_cor_sum(check1, p_filtering = F,sum_met = "median")
+get_cor_sum(check2, p_filtering = F,sum_met = "mean")
+get_cor_sum(check10, p_filtering = F,sum_met = "mean")
+
+get_cor_sum(check9, p_filtering = F,sum_met = "mean")
+
+get_cor_sum(check11, p_filtering = T,sum_met = "mean")
+
+get_cor_sum(check4, p_filtering = F,sum_met = "mean")
+get_cor_sum(check4, p_filtering = T,sum_met = "median")
+
+
+# check1 %>%ungroup %>% filter(p.value<0.05) %>%  summarise(mean_crispr=median(estimate))
+# check2 %>%ungroup  %>%  summarise(mean_rnai=median(estimate))
+# 
+# check3 %>%ungroup  %>%  summarise(mean_array=mean(estimate))
+# 
+# check4 %>% ungroup %>% filter(p.value<0.05) %>%summarise(mean_seq= mean(estimate))
+# 
+# check7 %>%ungroup %>%  summarise(mean_array=mean(estimate))
+# 
+# check8 %>% ungroup %>%summarise(mean_seq= mean(estimate))
+# 
+# check10 %>%ungroup %>%  summarise(mean_cn=mean(estimate))
+# 
+# check11 %>% ungroup %>%summarise(mean_cn= mean(estimate))
+```
+
+
+
+```{r}
+colnames(mtcars)
+mtcars %>% group_by(cyl) %>% summarise(mean_mpg=mean(mpg))
+check <- function(x) {
+  mtcars %>% group_by(x) %>% summarise(mean_mpg=mean(mpg))}
+check(x= cyl)
+
+check <- function(x) {
+  mtcars %>% group_by(!! x) %>% summarise(mean_mpg=mean(mpg))}
+check(x= "cyl")
+
+check <- function(x) {
+  mtcars %>% group_by(!! x) %>% summarise(mean_mpg=mean(mpg))}
+check(x= quo(cyl))
+
+
+check <- function(x) {
+  quo_x <- quo(x)
+  mtcars %>% 
+    group_by(!! quo_x) %>% 
+    summarise(mean_mpg=mean(mpg))
+  }
+check(x= cyl)
+
+check <- function(x) {
+  quo_x <- enquo(x)
+  mtcars %>% 
+    group_by(!! quo_x) %>% 
+    summarise(mean_mpg=mean(mpg))
+  }
+check(x= cyl)
+```
+Figure X1, 
+```{r}
+figx1 <- VennDiagram::venn.diagram(list(A=comess_gene, B=comess_gene2),
+                          filename = NULL,
+                          category.names =c("CEG1(2014)", "CEG2(2017)"),
+                          fill=rainbow(2),
+                         cex= 3,
+                         cat.cex=c(3.5,3.5),
+                         margin=0.15,
+                          cat.default.pos="outer"
+)
+
+setwd(dir = output_fig_dir)
+export_fig(fig_name = "figx11",height = 11, plot = figx1,unit = "cm")
+```
+
+
+
+figure x2, what is the expresssion level for the three reference sets?
+```{r}
+tmp <- data_long1 %>%
+  filter(gene %in%  c(hk_gene,comess_gene,comess_gene2, oncogene_2018)) %>% 
+  mutate(hk_bi= gene %in% hk_gene) %>% 
+  mutate(ceg_bi= gene %in% comess_gene) %>% 
+  mutate(ceg2_bi= gene %in% comess_gene2) %>% 
+  mutate(onco_bi= gene %in% oncogene_2018) %>% 
+  mutate(tsg_bi= gene %in% tsg_2018) 
+  
+# I need a long table where each record represents a unique 3-way comb of gene*cell*gene_type 
+tmp1 <- tmp %>% 
+  select(gene,array,ends_with("bi")) %>% 
+  gather(key="gene_type" , value= "gene_type_value",... = ends_with("bi")) %>% 
+  pull(gene) 
+sum(duplicated(tmp1))
+
+#I should check here for genes that are in both ref set is it properly marked here? 
+
+tmp %>% 
+  select(gene,array,ends_with("bi")) %>% 
+  gather(key="gene_type" , value= "gene_type_value",... = ends_with("bi")) %>% 
+  filter(gene_type_value== T ) %>% 
+  ggplot(aes(x= gene_type, y= array))+
+  geom_boxplot(lwd=1, width=0.2,color="black", 
+               outlier.shape = NA,
+               position = position_dodge(width = 1)
+                )
+  
+  
+  
+  
+  
+```
+```{r}
+tmp <- data_long1 %>%
+  filter(gene %in%  c(hk_gene,comess_gene,comess_gene2, oncogene_2018)) %>% 
+  mutate(hk_bi= gene %in% hk_gene) %>% 
+  mutate(ceg_bi= gene %in% comess_gene) %>% 
+  mutate(ceg2_bi= gene %in% comess_gene2) %>% 
+  mutate(onco_bi= gene %in% oncogene_2018) %>% 
+  mutate(tsg_bi= gene %in% tsg_2018) 
+  
+# I need a long table where each record represents a unique 3-way comb of gene*cell*gene_type 
+tmp1 <- tmp %>% 
+  select(gene,seq,ends_with("bi")) %>% 
+  gather(key="gene_type" , value= "gene_type_value",... = ends_with("bi")) %>% 
+  pull(gene) 
+sum(duplicated(tmp1))
+
+#I should check here for genes that are in both ref set is it properly marked here? 
+
+tmp %>% 
+  select(gene,seq,ends_with("bi")) %>% 
+  gather(key="gene_type" , value= "gene_type_value",... = ends_with("bi")) %>% 
+  filter(gene_type_value== T ) %>% 
+  ggplot(aes(x= gene_type, y= seq))+
+  geom_boxplot(lwd=1,color="black", 
+               outlier.shape = NA,
+               position = position_dodge(width = 1)
+                )+
+  ylim(-2,2)
+  
+  
+  
+  
+```
+
+
+```{r}
+tmp <- data_long1 %>%
+  filter(gene %in%  c(hk_gene,comess_gene,comess_gene2)) %>% 
+  mutate(hk_bi= gene %in% hk_gene) %>% 
+  mutate(ceg_bi= gene %in% comess_gene) %>% 
+  mutate(ceg2_bi= gene %in% comess_gene2)
+  
+# I need a long table where each record represents a unique 3-way comb of gene*cell*gene_type 
+tmp1 <- tmp %>% 
+  select(gene,array,ends_with("bi")) %>% 
+  gather(key="gene_type" , value= "gene_type_value",... = ends_with("bi")) %>% 
+  pull(gene) 
+sum(duplicated(tmp1))
+
+#I should check here for genes that are in both ref set is it properly marked here? 
+
+tmp %>% 
+  select(gene,array,ends_with("bi")) %>% 
+  gather(key="gene_type" , value= "gene_type_value",... = ends_with("bi")) %>% 
+  filter(gene_type_value== T ) %>% 
+  ggplot(aes(x= gene_type, y= array))+
+  geom_boxplot(lwd=1, width=0.2,color="black", 
+               outlier.shape = NA,
+               position = position_dodge(width = 1)
+                )+
+  theme_cowplot()+
+  xlab("")+
+  ylab("Gene expression by microarry")+
+   scale_x_discrete( labels= c("CEG(2014)", "CEG2(2017)", "Housekeeping genes"))
+  
+  
+```
+
+```{r}
+data_long1 %>% select(gene, crispr, rnai_un) %>% drop_na() %>% pull(gene) %>% unique() %>% length
+```
+
+
+```{r}
+## Create CGDS object
+mycgds = CGDS("http://www.cbioportal.org/")
+
+## Get list of cancer studies at server
+s_list <- getCancerStudies(mycgds)
+colnames(s_list)
+
+s_list$cancer_study_id %>% str_subset(pattern = "metabric")
+
+s_idx <- which(s_list$cancer_study_id %in% "brca_metabric") 
+mycancerstudy = getCancerStudies(mycgds)[s_idx,1]
+getCaseLists(mycgds,mycancerstudy)[,1]
+
+
+## Get available genetic profiles
+mygeneticprofile_list = getGeneticProfiles(mycgds,mycancerstudy)
+
+# Get clinical data for the case list
+#check <- getClinicalData(mycgds,"brca_tcga_all")
+myclinicaldata <-   getClinicalData(mycgds,"brca_metabric_all")
+```
+
+
+```{r}
+mygeneticprofile =mygeneticprofile_list[c(1,3),1]
+AGR2_cn <- getProfileData(mycgds,c('AGR2'),mygeneticprofile[1],"brca_metabric_all")
+AGR2_exp <- getProfileData(mycgds,c('AGR2'),mygeneticprofile[2],"brca_metabric_all")
+
+AGR2_cn <- rownames_to_column(AGR2_cn, var = "case_name") 
+colnames(AGR2_cn)[2] <- "cn"
+
+AGR2_exp <- rownames_to_column(AGR2_exp, var = "case_name")
+colnames(AGR2_exp)[2] <- "exp"
+myclinicaldata <- rownames_to_column(myclinicaldata, var = "case_name")
+
+library(rebus)
+clinialvar <- colnames(myclinicaldata)
+pat <- or("MONTH","SURVIVAL","STATUS")
+clivar <- str_subset(clinialvar, pat)
+clivar <- clivar[3:4]
+
+df <- select(myclinicaldata, c("case_name",clivar)) %>%  
+  full_join(AGR2_cn) %>%
+  full_join((AGR2_exp)) %>% 
+  mutate(AGR2_status= case_when((exp>2 | cn>1) ~ "High", 
+                                (exp<0 | cn>0)~ "Low",
+                                TRUE~ "unknown")   
+         )         
+
+summary(df)
+
+
+unique(df$OS_STATUS)
+df <- df %>% 
+  filter(AGR2_status != "unknown") %>% 
+   mutate(OS_STATUS_binary = case_when(OS_STATUS == "LIVING"~ F, 
+                                      OS_STATUS == "" ~ F,
+                                      OS_STATUS == "DECEASED"~ T)) 
+
+
+library(survival)
+library(ggfortify)
+
+KM0 <- survfit(Surv(OS_MONTHS,OS_STATUS_binary) ~ AGR2_status, data = df,
+                    type="kaplan-meier", conf.type="log") 
+p <- autoplot(KM0,xlab="time(month)", ylab="Survival rate",conf.int =F) 
+p
+
+survdiff(Surv(OS_MONTHS,OS_STATUS_binary) ~ AGR2_status, data = df)
+```
+
+
+
+
+
+```{r}
+
+s_list$cancer_study_id %>% str_subset(pattern = "beat")
+s_list$cancer_study_id %>% str_subset(pattern = "ohsu")
+#https://www.cbioportal.org/study/summary?id=aml_ohsu_2018
+s_idx <- which(s_list$cancer_study_id %in% "aml_ohsu_2018") 
+mycancerstudy = getCancerStudies(mycgds)[s_idx,1]
+getCaseLists(mycgds,mycancerstudy)[,1]
+## Get available genetic profiles
+mygeneticprofile_list = getGeneticProfiles(mycgds,mycancerstudy)
+
+# Get clinical data for the case list
+#check <- getClinicalData(mycgds,"brca_tcga_all")
+setwd(input_data_dir)
+#mygeneticprofile =mygeneticprofile_list[2,1] #cpm
+mygeneticprofile =mygeneticprofile_list[1,1] #rpkm
+SRGN_exp <- getProfileData(mycgds,'SRGN',mygeneticprofile,"aml_ohsu_2018_rna_seq_mrna")
+SRGN_exp <- tibble::rownames_to_column(SRGN_exp, var = "case_name")
+colnames(SRGN_exp)[2] <- "exp"
+# SRGN_exp <- 
+#   SRGN_exp %>% 
+#   as_tibble() %>% 
+#   mutate(exp1 = scale(x = log2(.data$exp), 
+#                       center = median(log2(.data$exp))
+#                       )
+ 
+SRGN_exp <-
+  SRGN_exp %>%
+  as_tibble() %>%
+  mutate(exp1=1)
+SRGN_exp$exp1 <-as.vector(scale(x = log(SRGN_exp$exp),
+                      center = median(log(SRGN_exp$exp))
+                      ))
+                    
+
+
+         
+hist(SRGN_exp$exp1)
+setwd(input_data_dir)
+myclinicaldata <-   fread("aml_ohsu_2018_clinical_data.tsv")
+myclinicaldata <- 
+  myclinicaldata  %>% 
+  select(one_of(c("Patient ID","Sample ID","Cancer Type", "Cause of death source","Overall Survival Status", "Overall Survival (Months)")) )
+table(myclinicaldata$`Cause of death source`)
+colnames(myclinicaldata)[1:6] <- c("P_ID","S_ID","type", "cause","OS_STATUS","OS_MONTHS")
+myclinicaldata$S_ID <- str_replace(myclinicaldata$S_ID,pattern = "-",replacement = ".")
+myclinicaldata$S_ID <- str_replace(myclinicaldata$S_ID,pattern = "2018.",replacement = "2018_")
+
+data <- left_join(SRGN_exp,myclinicaldata, by=c("case_name"="S_ID"))
+data %>% pull(P_ID) %>% n_distinct() #411 patients with 451 records
+
+data1 <- 
+  data  %>% 
+  filter(!(cause %in%  c("Dead-Other", "Dead-Unknown") )) %>%
+  filter(type == "Leukemia") %>% 
+  filter(!(is.na(OS_MONTHS)))
+
+data1 %>% pull(P_ID) %>% n_distinct() #297 patients with 330 records
+#374 samples for 341 patients
+setwd(input_data_dir)
+jing_plist <- scan(file = "patients_aml",what = "character")
+
+sum(jing_plist %in% data1$P_ID )
+
+which(duplicated(data1$P_ID))
+  
+
+#remove the samples coming from one patients?
+data1 %>% 
+  filter(!(P_ID  %in% data1[duplicated(data1$P_ID),4] ) ) %>% 
+ # pull(P_ID) %>% 
+  pull(case_name) %>% 
+  n_distinct()  
+
+
+ data2 <- 
+   data1 %>% 
+   mutate(case_name1 = str_split(data1$case_name,pattern = "_",simplify = T)[,4]) %>% 
+   mutate(case_name1 = as.numeric(case_name1)) %>% 
+   arrange((case_name1)) %>% 
+   #filter(!(P_ID  %in% data1$P_ID[duplicated(data1$P_ID)] ) )  %>%
+   filter(!(duplicated(data1$P_ID) ))  %>%
+   # select(-exp, -case_name) %>%
+   # group_by_at(vars(-exp1)) %>%
+   # summarise(exp1= mean(.data$exp1)) %>%
+   # ungroup() %>%
+   mutate(SRGN_status= case_when((exp1>0) ~ "High", 
+                                exp1<  0~ "Low")   
+         ) %>%          
+   mutate(OS_STATUS_binary = case_when(OS_STATUS == "LIVING"~ F, 
+                                      OS_STATUS == "" ~ F,
+                                      OS_STATUS == "DECEASED"~ T)) %>% 
+   filter(!(is.na(SRGN_status)))
+  
+# data2 %>% 
+#   filter(!(P_ID  %in% data1[duplicated(data1$P_ID),4] ) ) %>% 
+#   pull(P_ID) %>% 
+#  # pull(case_name) %>% 
+#   n_distinct()  
+
+library(survival)
+library(ggfortify)
+
+KM0 <- survfit(Surv(OS_MONTHS,OS_STATUS_binary) ~ SRGN_status, data = data2,
+                    type="kaplan-meier", conf.type="log") 
+p <- autoplot(KM0,xlab="time(month)", ylab="Survival rate",conf.int =F) 
+p
+survdiff(Surv(OS_MONTHS,OS_STATUS_binary) ~ SRGN_status, data = data2)
+
+
+
+
+```
+
+```{r}
+check <- 
+   data1 %>% 
+   mutate(case_name1 = str_split(data1$case_name,pattern = "_",simplify = T)[,4]) %>% 
+   mutate(case_name1 = as.numeric(case_name1)) %>% 
+   arrange(case_name1) %>% 
+  filter((P_ID  %in% data1$P_ID[duplicated(data1$P_ID)] ) )
+
+
+ data2 <- 
+   data1 %>% 
+   mutate(case_name1 = str_split(data1$case_name,pattern = "_",simplify = T)[,4]) %>% 
+   mutate(case_name1 = as.numeric(case_name1)) %>% 
+   arrange(case_name1) %>% 
+   #filter(!(P_ID  %in% data1$P_ID[duplicated(data1$P_ID)] ) )  %>%
+   filter(!(duplicated(data1$P_ID) )) 
+ 
+chcek <- data2 %>% 
+  filter((P_ID  %in% data1$P_ID[duplicated(data1$P_ID)] ) )
+
+
+```
+
