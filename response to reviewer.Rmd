@@ -562,7 +562,7 @@ figure x2, what is the expresssion level for the three reference sets?
 tmp <- data_long1 %>%
   filter(gene %in%  c(hk_gene,comess_gene,comess_gene2, oncogene_2018)) %>% 
   mutate(hk_bi= gene %in% hk_gene) %>% 
-  mutate(ceg_bi= gene %in% comess_gene) %>% 
+  mutate(ceg_bi= gene %in% setdiff(comess_gene,comess_gene2)) %>% 
   mutate(ceg2_bi= gene %in% comess_gene2) %>% 
   mutate(onco_bi= gene %in% oncogene_2018) %>% 
   mutate(tsg_bi= gene %in% tsg_2018) 
@@ -630,7 +630,7 @@ tmp %>%
 tmp <- data_long1 %>%
   filter(gene %in%  c(hk_gene,comess_gene,comess_gene2)) %>% 
   mutate(hk_bi= gene %in% hk_gene) %>% 
-  mutate(ceg_bi= gene %in% comess_gene) %>% 
+  mutate(ceg_bi= gene %in% setdiff(comess_gene,comess_gene2)) %>% 
   mutate(ceg2_bi= gene %in% comess_gene2)
   
 # I need a long table where each record represents a unique 3-way comb of gene*cell*gene_type 
@@ -654,7 +654,7 @@ tmp %>%
   theme_cowplot()+
   xlab("")+
   ylab("Gene expression by microarry")+
-   scale_x_discrete( labels= c("CEG(2014)", "CEG2(2017)", "Housekeeping genes"))
+   scale_x_discrete( labels= c("CEG1(unique)", "CEG2", "Housekeeping genes"))
   
   
 ```
@@ -665,6 +665,7 @@ data_long1 %>% select(gene, crispr, rnai_un) %>% drop_na() %>% pull(gene) %>% un
 
 
 ```{r}
+
 ## Create CGDS object
 mycgds = CGDS("http://www.cbioportal.org/")
 
@@ -685,6 +686,11 @@ mygeneticprofile_list = getGeneticProfiles(mycgds,mycancerstudy)
 # Get clinical data for the case list
 #check <- getClinicalData(mycgds,"brca_tcga_all")
 myclinicaldata <-   getClinicalData(mycgds,"brca_metabric_all")
+myclinicaldata <-   myclinicaldata %>% 
+  rownames_to_column(var = "case_name") %>% 
+  filter(ER_STATUS == "Positive" ) %>% 
+  filter(ER_IHC == "Positve") %>% 
+  filter(VITAL_STATUS %in% c("Died of Disease", "Living"  ))
 ```
 
 
@@ -698,7 +704,7 @@ colnames(AGR2_cn)[2] <- "cn"
 
 AGR2_exp <- rownames_to_column(AGR2_exp, var = "case_name")
 colnames(AGR2_exp)[2] <- "exp"
-myclinicaldata <- rownames_to_column(myclinicaldata, var = "case_name")
+
 
 library(rebus)
 clinialvar <- colnames(myclinicaldata)
@@ -710,12 +716,19 @@ clivar <- clivar[3:4]
 
 ```{r}
 df <- select(myclinicaldata, c("case_name",clivar)) %>%  
+  filter(!(is.na(OS_MONTHS))) %>% 
   full_join(AGR2_cn) %>%
   full_join((AGR2_exp)) %>% 
-  mutate(AGR2_status= case_when((exp> 0 | cn >0.5 ) ~ "High", 
-                                (exp< 0 |cn < -0.5 )~ "Low",
-                                TRUE~ "unknown")   
-         )       
+  drop_na() %>% 
+  mutate(AGR2_status= case_when( 
+                                (exp > 2 | cn >1) ~ "High",
+                                TRUE~ "unknown") 
+         )    
+#  filter(AGR2_status != "unknown" )
+
+table(df$AGR2_status)
+
+hist(df$cn)
 
 summary(df)
 
@@ -723,10 +736,10 @@ table(df$AGR2_status)
 
 unique(df$OS_STATUS)
 df <- df %>% 
-  filter(AGR2_status != "unknown") %>% 
+#  filter(AGR2_status != "unknown") %>% 
    mutate(OS_STATUS_binary = case_when(OS_STATUS == "LIVING"~ F, 
                                       OS_STATUS == "" ~ F,
-                                      OS_STATUS == "DECEASED"~ T)) 
+                                      OS_STATUS == "DECEASED"~ T))
 
 
 library(survival)
@@ -738,8 +751,6 @@ p <- autoplot(KM0,xlab="time(month)", ylab="Survival rate",conf.int =F,censor = 
 p
 
 survdiff(Surv(OS_MONTHS,OS_STATUS_binary) ~ AGR2_status, data = df)
-
-
 
 ```
 
@@ -841,7 +852,9 @@ which(duplicated(data1$P_ID))
                                       OS_STATUS == "" ~ F,
                                       OS_STATUS == "DECEASED"~ T)) %>% 
    filter(!(is.na(SRGN_status)))
-  
+
+#data2 contains 297 samples for 297 patients, for patients with more than one sample, the sample with smaller sample_id have been used.  
+   
 # data2 %>% 
 #   filter(!(P_ID  %in% data1[duplicated(data1$P_ID),4] ) ) %>% 
 #   pull(P_ID) %>% 
@@ -888,8 +901,5 @@ chcek <- data2 %>%
 
 ```
 
-```{r}
-
-```
 
  
